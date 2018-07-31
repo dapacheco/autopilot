@@ -35,7 +35,7 @@ func venerableAppName(appName string) string {
 	return fmt.Sprintf("%s-venerable", appName)
 }
 
-func getActionsForApp(appRepo *ApplicationRepo, appName, manifestPath, appPath string, showLogs bool) []rewind.Action {
+func getActionsForApp(appRepo *ApplicationRepo, appName, manifestPath, appPath string, showLogs bool, dockerImage string) []rewind.Action {
 	venName := venerableAppName(appName)
 	var err error
 	var curApp, venApp *AppEntity
@@ -97,7 +97,7 @@ func getActionsForApp(appRepo *ApplicationRepo, appName, manifestPath, appPath s
 		// push
 		{
 			Forward: func() error {
-				return appRepo.PushApplication(appName, manifestPath, appPath, showLogs)
+				return appRepo.PushApplication(appName, manifestPath, appPath, showLogs, dockerImage)
 			},
 			ReversePrevious: func() error {
 				if !haveVenToCleanup {
@@ -123,12 +123,12 @@ func getActionsForApp(appRepo *ApplicationRepo, appName, manifestPath, appPath s
 	}
 }
 
-func getActionsForNewApp(appRepo *ApplicationRepo, appName, manifestPath, appPath string, showLogs bool) []rewind.Action {
+func getActionsForNewApp(appRepo *ApplicationRepo, appName, manifestPath, appPath string, showLogs bool, dockerImage string) []rewind.Action {
 	return []rewind.Action{
 		// push
 		{
 			Forward: func() error {
-				return appRepo.PushApplication(appName, manifestPath, appPath, showLogs)
+				return appRepo.PushApplication(appName, manifestPath, appPath, showLogs, dockerImage)
 			},
 		},
 	}
@@ -141,11 +141,11 @@ func (plugin AutopilotPlugin) Run(cliConnection plugin.CliConnection, args []str
 	}
 
 	appRepo := NewApplicationRepo(cliConnection)
-	appName, manifestPath, appPath, showLogs, err := ParseArgs(args)
+	appName, manifestPath, appPath, showLogs, dockerImage, err := ParseArgs(args)
 	fatalIf(err)
 
 	fatalIf((&rewind.Actions{
-		Actions:              getActionsForApp(appRepo, appName, manifestPath, appPath, showLogs),
+		Actions:              getActionsForApp(appRepo, appName, manifestPath, appPath, showLogs, dockerImage),
 		RewindFailureMessage: "Oh no. Something's gone wrong. I've tried to roll back but you should check to see if everything is OK.",
 	}).Execute())
 
@@ -162,41 +162,42 @@ func (AutopilotPlugin) GetMetadata() plugin.PluginMetadata {
 		Version: plugin.VersionType{
 			Major: 0,
 			Minor: 0,
-			Build: 6,
+			Build: 7,
 		},
 		Commands: []plugin.Command{
 			{
 				Name:     "zero-downtime-push",
 				HelpText: "Perform a zero-downtime push of an application over the top of an old one",
 				UsageDetails: plugin.Usage{
-					Usage: "$ cf zero-downtime-push application-to-replace \\ \n \t-f path/to/new_manifest.yml \\ \n \t-p path/to/new/path",
+					Usage: "$ cf zero-downtime-push application-to-replace \\ \n \t-f path/to/new_manifest.yml \\ \n \t-p path/to/new/path \\ \n \t-o docker-image",
 				},
 			},
 		},
 	}
 }
 
-func ParseArgs(args []string) (string, string, string, bool, error) {
+func ParseArgs(args []string) (string, string, string, bool, string, error) {
 	flags := flag.NewFlagSet("zero-downtime-push", flag.ContinueOnError)
 	manifestPath := flags.String("f", "", "path to an application manifest")
 	appPath := flags.String("p", "", "path to application files")
 	showLogs := flags.Bool("show-app-log", false, "tail and show application log during application start")
+	dockerImage := flags.String("o", "", "docker image to be used")
 
 	if len(args) < 2 || strings.HasPrefix(args[1], "-") {
-		return "", "", "", false, ErrNoArgs
+		return "", "", "", false, "", ErrNoArgs
 	}
 	err := flags.Parse(args[2:])
 	if err != nil {
-		return "", "", "", false, err
+		return "", "", "", false, "", err
 	}
 
 	appName := args[1]
 
 	if *manifestPath == "" {
-		return "", "", "", false, ErrNoManifest
+		return "", "", "", false, "", ErrNoManifest
 	}
 
-	return appName, *manifestPath, *appPath, *showLogs, nil
+	return appName, *manifestPath, *appPath, *showLogs, *dockerImage, nil
 }
 
 var (
@@ -219,11 +220,15 @@ func (repo *ApplicationRepo) RenameApplication(oldName, newName string) error {
 	return err
 }
 
-func (repo *ApplicationRepo) PushApplication(appName, manifestPath, appPath string, showLogs bool) error {
+func (repo *ApplicationRepo) PushApplication(appName, manifestPath, appPath string, showLogs bool, dockerImage string) error {
 	args := []string{"push", appName, "-f", manifestPath, "--no-start"}
 
 	if appPath != "" {
 		args = append(args, "-p", appPath)
+	}
+
+	if dockerImage != "" {
+		args = append(args, "-o", dockerImage)
 	}
 
 	_, err := repo.conn.CliCommand(args...)
